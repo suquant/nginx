@@ -11,7 +11,8 @@ set -eo pipefail
 
 # configure etcd
 export ETCD_PORT=${ETCD_PORT:-4001}
-export ETCD="$ETCD_HOST:$ETCD_PORT"
+export ETCD="$HOST:$ETCD_PORT"
+export ETCD_PATH="/nginx"
 export ETCD_TTL=${ETCD_TTL:-10}
 
 # wait for etcd to be available
@@ -25,6 +26,10 @@ sleep $(($ETCD_TTL+1))
 
 function etcd_safe_mkdir {
   etcdctl --no-sync -C $ETCD mkdir $1 >/dev/null 2>&1 || true
+}
+
+function etcd_set_default {
+  etcdctl --no-sync -C $ETCD mk $ETCD_PATH/$1 $2 >/dev/null 2>&1 || true
 }
 
 etcd_safe_mkdir /nginx/services
