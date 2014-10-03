@@ -1,0 +1,66 @@
+#!/bin/bash
+#
+# This script is designed to be run inside the container
+#
+
+# fail hard and fast even on pipelines
+set -eo pipefail
+
+# set debug based on envvar
+[[ $DEBUG ]] && set -x
+
+# configure etcd
+export ETCD_PORT=${ETCD_PORT:-4001}
+export ETCD="$ETCD_HOST:$ETCD_PORT"
+export ETCD_TTL=${ETCD_TTL:-10}
+
+# wait for etcd to be available
+until etcdctl --no-sync -C $ETCD ls >/dev/null 2>&1; do
+    echo "waiting for etcd at $ETCD..."
+    sleep $(($ETCD_TTL/2))  # sleep for half the TTL
+done
+
+# wait until etcd has discarded potentially stale values
+sleep $(($ETCD_TTL+1))
+
+function etcd_safe_mkdir {
+  etcdctl --no-sync -C $ETCD mkdir $1 >/dev/null 2>&1 || true
+}
+
+etcd_safe_mkdir /nginx/services
+etcd_safe_mkdir /nginx/domains
+etcd_set_default port ${PORT:-80}
+etcd_set_default gzip on
+etcd_set_default gzipHttpVersion 1.0
+etcd_set_default gzipCompLevel 2
+etcd_set_default gzipProxied any
+etcd_set_default gzipVary on
+etcd_set_default gzipDisable "\"msie6\""
+etcd_set_default gzipTypes "application/x-javascript application/xhtml+xml application/xml application/xml+rss application/json text/css text/javascript text/plain text/xml"
+
+# wait for confd to run once and install initial templates
+until confd -onetime -node $ETCD -config-file /app/confd.toml >/dev/null 2>/dev/null; do
+    echo "router: waiting for confd to write initial templates..."
+    sleep $(($ETCD_TTL/2))  # sleep for half the TTL
+done
+
+# spawn the service in the background
+echo "Starting Nginx..."
+/usr/sbin/nginx &
+SERVICE_PID=$!
+
+# smart shutdown on SIGINT and SIGTERM
+function on_exit() {
+    kill -TERM $SERVICE_PID
+    wait $SERVICE_PID 2>/dev/null
+    exit 0
+}
+trap on_exit INT TERM
+
+# spawn confd in the background to update services based on etcd changes
+confd -node $ETCD -config-file /app/confd.toml &
+CONFD_PID=$!
+
+echo nginx-router running...
+
+wait
